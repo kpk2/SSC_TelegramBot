@@ -19,19 +19,45 @@ class QuestionsLoader:
                 questions_list = json.load(f)
 
             questions_dict = {}
+            used_ids = set()
+            next_generated_id = 0
+
             for q in questions_list:
                 text = q.get("text", "Domanda non disponibile")
                 options = q.get("options", [])
                 correct_index = q.get("correct_index", 0)
                 verified = q.get("verified", False)
                 explanation = q.get("explanation", "")
-                topic = q.get("topic", None)
-                id=q.get("id",-1)
-                language=q.get("language","it")
-                q = Question(text, options, correct_index, verified, explanation, topic,id,language)
-                questions_dict[id] = q
+                topic = q.get("topic") or q.get("Test") or "Uncategorized"
+                question_id = q.get("id", -1)
+                language = q.get("language", "it")
+
+                if not isinstance(options, list):
+                    options = []
+                if not isinstance(correct_index, int):
+                    correct_index = -1
+                if not isinstance(verified, bool):
+                    verified = bool(verified)
+                if not isinstance(topic, str):
+                    topic = str(topic)
+                if not isinstance(language, str):
+                    language = str(language)
+
+                # Generate stable in-memory IDs when dataset IDs are missing/invalid/duplicated.
+                if not isinstance(question_id, int) or question_id < 0 or question_id in used_ids:
+                    while next_generated_id in used_ids:
+                        next_generated_id += 1
+                    question_id = next_generated_id
+                    next_generated_id += 1
+
+                used_ids.add(question_id)
+                q = Question(text, options, correct_index, verified, explanation, topic, question_id, language)
+                questions_dict[question_id] = q
             self.logger.info(f"Loaded {len(questions_dict)} questions from {path}")
             return questions_dict
+        except json.JSONDecodeError as exc:
+            self.logger.error(f"File {path} is not a valid JSON file: {exc}")
+            return {}
         except FileNotFoundError:
             self.logger.error(f"File {path} not found")
             return {}

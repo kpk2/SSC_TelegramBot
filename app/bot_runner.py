@@ -7,9 +7,10 @@ from app import main_menu_text, get_next_question_id
 from config import LANGUAGE_SELECTION, TOPIC_SELECTION, QUESTION_NUMBER_SELECTION, CORRECT_ANSWER_WEIGHT, WRONG_ANSWER_WEIGHT, DEFAULT_NUMBER_OF_QUESTIONS
 from .handlers import (State,
     make_inline_keyboard_for_choice, make_inline_keyboard_for_question_quiz,
+    make_inline_keyboard_for_incorrect_solutions,
     _escape_markdown, make_inline_keyboard_from_list, make_inline_keyboard_for_list,
     extract_list_of_main_operations,
-    CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU
+    CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU, CALLBACK_SOLUTION_PREFIX
 )
 import random, time
 
@@ -26,6 +27,7 @@ class QuizBot:
             State.SELECT_LANGUAGE: self.conv_quiz_selected_language,
             State.SELECT_TOPIC: self.conv_quiz_selected_topic,
             State.ANSWERING_QUESTION: self.conv_quiz_answer,
+            State.REVIEW_INCORRECT: self.conv_quiz_review_incorrect_solution,
             State.IF_LANGUAGE: self.conv_quiz_language_selection,
             State.IF_TOPIC: self.conv_quiz_topic_selection,
             State.SELECT_CUSTOM_NQUESTION: self.conv_quiz_questions_selection,
@@ -266,20 +268,35 @@ class QuizBot:
         user_id = update.effective_user.id
         selected_topic = context.user_data.get("selected_topic")
         selected_language = context.user_data.get("selected_language")
-        excluded_keys_t = None
-        excluded_keys_l = None
+        excluded_keys_t = []
+        excluded_keys_l = []
         if selected_topic:
             excluded_keys_t = self.quiz_manager.exclude_questions_not_related_to_selected_topic(selected_topic)
         if selected_language:
             excluded_keys_l = self.quiz_manager.exclude_questions_not_related_to_selected_language(selected_language)
+        already_answered_ids = self.quiz_manager.get_answered_question_ids(user_id)
+        excluded_keys_t = list(set(excluded_keys_t).union(already_answered_ids))
         questions_ids = self.quiz_manager.pick_questions(n_questions, excluded_keys_t, excluded_keys_l)
+        if not questions_ids:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown(
+                    "_No new unanswered questions are available for your selection. Add more questions or clear history._"
+                ),
+                parse_mode="MarkdownV2",
+            )
+            await self.command_restart(update, context)
+            return
         self.logger.info(f"Message : started a quiz with {len(questions_ids)} questions.")
         context.user_data["quiz"] = {
             "questions_ids": questions_ids,
             "current_question_scramble_map": {},
+            "current_question_start_time": None,
             "current_index": 0,
             "correct_count": 0,
-            "wrong_count" : 0
+            "wrong_count" : 0,
+            "skipped_count": 0,
+            "question_results": []
         }
         context.user_data["start_time"] = time.time()
         await self.conv_quiz_send_question(update, context)
@@ -298,6 +315,7 @@ class QuizBot:
 
         scrambled_options_map = self.quiz_manager.scramble_options(question.options)
         user_quiz["current_question_scramble_map"] = scrambled_options_map
+        user_quiz["current_question_start_time"] = time.time()
 
         scrambled_options = [question.options[scrambled_options_map[i]] for i in range(len(question.options))]
         message_text = f"❓ *Question {current_index + 1}/{len(question_ids)}*\n\n{question.question_to_string(scrambled_options_map)}"
@@ -310,74 +328,224 @@ class QuizBot:
         )
         context.user_data["last_message_id"] = message.message_id
 
+    def _build_solution_callback_data(self, result_index: int) -> str:
+        return f"{CALLBACK_SOLUTION_PREFIX}{result_index}"
+
+    async def _send_incorrect_solutions_menu(self, update: Update, context: CallbackContext):
+        user_quiz = context.user_data.get("quiz", {})
+        question_results = user_quiz.get("question_results", [])
+        incorrect_results = [result for result in question_results if not result.get("is_correct")]
+
+        if not incorrect_results:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown("No incorrect questions to review."),
+                parse_mode="MarkdownV2",
+            )
+            await self.command_restart(update, context)
+            return
+
+        solution_items = []
+        for result_index, result in enumerate(incorrect_results):
+            callback_data = self._build_solution_callback_data(result_index)
+            result["callback_data"] = callback_data
+            solution_items.append(
+                {
+                    "label": f"Q{result.get('question_number', result_index + 1)}",
+                    "callback_data": callback_data,
+                }
+            )
+
+        context.user_data["incorrect_question_results"] = incorrect_results
+        message = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_escape_markdown(
+                "_Select an incorrect question to view its solution:_"
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=make_inline_keyboard_for_incorrect_solutions(solution_items),
+        )
+        context.user_data["state"] = State.REVIEW_INCORRECT
+        context.user_data["last_message_id"] = message.message_id
+
     async def conv_quiz_answer(self, update: Update, context: CallbackContext):
         query = update.callback_query
         action = query.data
-        user_quiz = context.user_data.get("quiz")
         user_quiz = context.user_data["quiz"]
         current_index = user_quiz["current_index"]
         question_ids = user_quiz["questions_ids"]
 
+        question_id = question_ids[current_index]
+        question = self.quiz_manager.get_question_data(question_id)
+        scrambled_options_map = user_quiz["current_question_scramble_map"]
+        question_start_time = user_quiz.get("current_question_start_time")
+        time_taken_seconds = 0.0
+        if question_start_time:
+            time_taken_seconds = time.time() - question_start_time
+
+        correct = next(
+            (fake_idx for fake_idx, real_idx in scrambled_options_map.items() if real_idx == question.correct_index),
+            None,
+        )
+        correct_option_label = chr(correct + ord('A')) if isinstance(correct, int) else "N/A"
+        correct_option_text = (
+            question.options[question.correct_index]
+            if 0 <= question.correct_index < len(question.options)
+            else ""
+        )
+
         if action == CALLBACK_SKIP:
-            user_quiz["current_index"] += 1
+            selected_option_real_index = -1
+            selected_option_text = ""
+            is_correct = False
+            user_quiz["skipped_count"] += 1
         else:
-            question_id = question_ids[current_index]
-            question = self.quiz_manager.get_question_data(question_id)
-            q = self.quiz_manager.get_question_data(question_id)
-            scrambled_options_map = user_quiz["current_question_scramble_map"]
             chosen_option = ord(action) - ord('A')
+            selected_option_real_index = scrambled_options_map.get(chosen_option, chosen_option)
+            selected_option_text = (
+                question.options[selected_option_real_index]
+                if 0 <= selected_option_real_index < len(question.options)
+                else ""
+            )
             is_correct = self.quiz_manager.check_answer(question_id, chosen_option, scrambled_options_map)
-            correct = next(fake_idx for fake_idx, real_idx in scrambled_options_map.items() if real_idx == q.correct_index)
-            message_text = f"❓ *Question {current_index + 1}/{len(question_ids)}*\n\n{question.question_to_string(scrambled_options_map)}\n\n"
             if is_correct:
                 user_quiz["correct_count"] += 1
-                message_text += f"✅ *Correct answer!*\n\nYour answer: {action}\n"
             else:
                 user_quiz["wrong_count"] += 1
-                message_text += f"❌ *Wrong answer!*\n\nYour answer: {action}\nCorrect answer: ||{chr(correct + ord('A'))}||\n"
-            if "None" not in q.explanation:
-                message_text += f"_Comment: {q.explanation}_\n"
-            else:
-                message_text += f"_Comment not available._\n"
 
-            message_text = _escape_markdown(message_text)
+        result_entry = {
+            "question_id": question_id,
+            "question_number": current_index + 1,
+            "is_correct": is_correct,
+            "selected_option_label": action,
+            "selected_option_index": selected_option_real_index,
+            "selected_option_text": selected_option_text,
+            "correct_option_label": correct_option_label,
+            "correct_option_index": question.correct_index,
+            "correct_option_text": correct_option_text,
+            "time_taken_seconds": round(max(time_taken_seconds, 0), 3),
+        }
+        user_quiz["question_results"].append(result_entry)
 
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, parse_mode="MarkdownV2")
+        self.quiz_manager.save_answer_details(
+            question_id=question_id,
+            question_text=question.text,
+            user_id=update.effective_user.id,
+            selected_option_label=action,
+            selected_option_index=selected_option_real_index,
+            selected_option_text=selected_option_text,
+            correct_option_label=correct_option_label,
+            correct_option_index=question.correct_index,
+            correct_option_text=correct_option_text,
+            is_correct=is_correct,
+            time_taken_seconds=time_taken_seconds,
+            question_number=current_index + 1,
+            total_questions=len(question_ids),
+        )
 
-            user_quiz["current_index"] += 1
-
+        user_quiz["current_index"] += 1
         await self.conv_quiz_send_question(update, context)
 
     async def conv_quiz_finish(self, update: Update, context: CallbackContext):
         user_quiz = context.user_data.get("quiz", {})
         correct = user_quiz.get("correct_count", 0)
         wrong = user_quiz.get("wrong_count", 0)
+        skipped = user_quiz.get("skipped_count", 0)
         total = len(user_quiz.get("questions_ids", []))
-        score = self.quiz_manager.quiz_score(correct, wrong) 
+        incorrect_total = total - correct
+        score = self.quiz_manager.quiz_score(correct, wrong)
+
+        total_time_text = "N/A"
         start_time = context.user_data.get("start_time")
         if start_time:
-            end_time = time.time()
-            time_taken = end_time - start_time
+            time_taken = max(time.time() - start_time, 0)
             hours, remainder = divmod(time_taken, 3600)
             minutes, seconds = divmod(remainder, 60)
-            time_taken_formatted = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=_escape_markdown(f"🏁 *Quiz finished!*\n\n"
-                    f"⏳ Time taken: {time_taken_formatted}\n"
-                    f"✅ Correct answers: {correct}/{total}\n"
-                    f"👉 Final score: {score:.2f}"),
-                parse_mode="MarkdownV2",
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=_escape_markdown(f"🏁 *Quiz finished!*\n\n"
-                    f"✅ Correct answers: {correct}/{total}\n"
-                    f"👉 Final score: {score:.2f}"),
-                parse_mode="MarkdownV2",
-            )
+            total_time_text = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
+
+        question_results = user_quiz.get("question_results", [])
+        avg_time = 0.0
+        if question_results:
+            avg_time = sum(result.get("time_taken_seconds", 0.0) for result in question_results) / len(question_results)
+
+        summary_text = (
+            f"*Quiz finished!*\n\n"
+            f"Total questions: {total}\n"
+            f"Correct answers: {correct}/{total}\n"
+            f"Incorrect/Skipped: {incorrect_total}/{total}\n"
+            f"Wrong answers: {wrong}\n"
+            f"Skipped: {skipped}\n"
+            f"Final score: {score:.2f}\n"
+            f"Total time: {total_time_text}\n"
+            f"Average time/question: {avg_time:.2f} sec"
+        )
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_escape_markdown(summary_text),
+            parse_mode="MarkdownV2",
+        )
+
+        if incorrect_total > 0:
+            await self._send_incorrect_solutions_menu(update, context)
+            return
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_escape_markdown("Great job! You have no incorrect answers to review."),
+            parse_mode="MarkdownV2",
+        )
         await self.command_restart(update, context)
+
+    async def conv_quiz_review_incorrect_solution(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        callback_data = query.data
+        incorrect_results = context.user_data.get("incorrect_question_results", [])
+        selected_result = next(
+            (result for result in incorrect_results if result.get("callback_data") == callback_data),
+            None,
+        )
+
+        if selected_result is None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown("Invalid selection. Please choose a question from the list."),
+                parse_mode="MarkdownV2",
+            )
+            await self._send_incorrect_solutions_menu(update, context)
+            return
+
+        question = self.quiz_manager.get_question_data(selected_result["question_id"])
+        if question is None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown("Question not found in the current database."),
+                parse_mode="MarkdownV2",
+            )
+            await self._send_incorrect_solutions_menu(update, context)
+            return
+
+        selected_label = selected_result.get("selected_option_label", "N/A")
+        selected_text = selected_result.get("selected_option_text", "")
+        if selected_label == CALLBACK_SKIP:
+            selected_display = "Skipped"
+        elif selected_text:
+            selected_display = f"{selected_label} - {selected_text}"
+        else:
+            selected_display = selected_label
+
+        solution_text = (
+            f"*Review - Question {selected_result.get('question_number', 0)}*\n\n"
+            f"{question.question_to_string_for_review()}\n"
+            f"*Your answer:* {selected_display}\n"
+            f"*Time taken:* {selected_result.get('time_taken_seconds', 0.0):.3f} sec\n"
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_escape_markdown(solution_text),
+            parse_mode="MarkdownV2",
+        )
+        await self._send_incorrect_solutions_menu(update, context)
 
    # Functions for review questions
 

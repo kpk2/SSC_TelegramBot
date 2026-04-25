@@ -15,12 +15,14 @@ class State(Enum):
     SELECT_NUMQUESTION = auto()
     ANSWERING_QUESTION = auto()
     REVIEW = auto()
+    REVIEW_INCORRECT = auto()
 
 # Callback Data Constants
 CALLBACK_YES = "Yes"
 CALLBACK_NO = "No"
 CALLBACK_SKIP = "Skip"
 CALLBACK_MAIN_MENU = "main_menu"
+CALLBACK_SOLUTION_PREFIX = "solution_"
 
 def make_inline_keyboard_from_list(list_options: list, row_size: int = 2) -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(option[1], callback_data=option[0]) for option in list_options]
@@ -41,6 +43,15 @@ def make_inline_keyboard_for_question_quiz(num_options: int, row_size: int = 2) 
     buttons = [InlineKeyboardButton(letter, callback_data=letter) for letter in letters]
     rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
     rows.append([InlineKeyboardButton(CALLBACK_SKIP, callback_data=CALLBACK_SKIP)])
+    return InlineKeyboardMarkup(rows)
+
+def make_inline_keyboard_for_incorrect_solutions(solution_items: list, row_size: int = 4) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(item["label"], callback_data=item["callback_data"])
+        for item in solution_items
+    ]
+    rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
+    rows.append([InlineKeyboardButton("Main Menu", callback_data=CALLBACK_MAIN_MENU)])
     return InlineKeyboardMarkup(rows)
 
 def _escape_markdown(text: str) -> str:

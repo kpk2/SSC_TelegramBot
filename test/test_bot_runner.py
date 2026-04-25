@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, ANY
 from app.bot_runner import QuizBot
 from telegram import Update, Bot
 from telegram.ext import CallbackContext
@@ -31,6 +31,9 @@ def mock_context():
     # Create a mock CallbackContext
     context = MagicMock(spec=CallbackContext)
     context.user_data = {}
+    message = MagicMock()
+    message.message_id = 1
+    context.bot.send_message = AsyncMock(return_value=message)
     return context
 
 # Test for the /start command
@@ -40,11 +43,11 @@ async def test_command_start(mock_bot, mock_update, mock_context):
     await mock_bot.command_start(mock_update, mock_context)
     
     # Verify that the send_message method is called with the correct parameters
-    mock_bot.application.bot.send_message.assert_called_once_with(
+    mock_context.bot.send_message.assert_called_once_with(
         chat_id=mock_update.effective_chat.id,
         text=_escape_markdown(main_menu_text),
         parse_mode="MarkdownV2",
-        reply_markup=MagicMock.ANY  # Verify that a reply_markup is passed
+        reply_markup=ANY  # Verify that a reply_markup is passed
     )
     assert mock_context.user_data["state"] == State.SELECTING_ACTION
 
@@ -73,10 +76,10 @@ async def test_command_restart(mock_bot, mock_update, mock_context):
     await mock_bot.command_restart(mock_update, mock_context)
     
     # Verify that the restart message is sent and the state logic has been reset
-    mock_bot.application.bot.send_message.assert_called_once_with(
+    mock_context.bot.send_message.assert_called_once_with(
         chat_id=mock_update.effective_chat.id,
         text=_escape_markdown(main_menu_text),
         parse_mode="MarkdownV2",
-        reply_markup=MagicMock.ANY
+        reply_markup=ANY
     )
     assert mock_context.user_data["state"] == State.SELECTING_ACTION
