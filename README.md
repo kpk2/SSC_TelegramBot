@@ -107,3 +107,18 @@ Once you've completed the installation and configuration steps, you can start th
 python main.py
 ```
 
+## Deploy on Render
+This bot uses Telegram long polling, so on Render it should run as a **Background Worker** (not a Web Service).
+
+1. Push this repository to GitHub.
+2. In Render Dashboard, create a new **Blueprint** and connect this repo.
+3. Render will detect `render.yaml` and create the `ssc-telegrambot` worker.
+4. In Render service settings, set environment variable:
+   - `TOKEN` = your Telegram bot token
+5. Deploy the service.
+
+The worker start command is:
+```bash
+python main.py
+```
+
