@@ -7,6 +7,7 @@ from enum import Enum, auto
 # Conversation states
 class State(Enum):
     SELECTING_ACTION = auto()
+    SELECT_PAPER = auto()
     IF_LANGUAGE = auto()
     SELECT_LANGUAGE = auto()
     IF_TOPIC = auto()
@@ -23,6 +24,7 @@ CALLBACK_NO = "No"
 CALLBACK_SKIP = "Skip"
 CALLBACK_MAIN_MENU = "main_menu"
 CALLBACK_SOLUTION_PREFIX = "solution_"
+CALLBACK_PAPER_PREFIX = "paper_"
 
 def make_inline_keyboard_from_list(list_options: list, row_size: int = 2) -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(option[1], callback_data=option[0]) for option in list_options]

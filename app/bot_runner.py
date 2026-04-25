@@ -10,9 +10,11 @@ from .handlers import (State,
     make_inline_keyboard_for_incorrect_solutions,
     _escape_markdown, make_inline_keyboard_from_list, make_inline_keyboard_for_list,
     extract_list_of_main_operations,
-    CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU, CALLBACK_SOLUTION_PREFIX
+    CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU, CALLBACK_SOLUTION_PREFIX,
+    CALLBACK_PAPER_PREFIX
 )
 import html
+import os
 import random, time
 
 
@@ -20,11 +22,32 @@ class QuizBot:
    
     def __init__(self, token, questions_json_path, logger):
         self.token = token
-        self.quiz_manager = QuizManager(questions_json_path,logger)
+        self.default_questions_json_path = questions_json_path
+        self.questions_data_dir = os.path.dirname(questions_json_path) or "."
+        initial_questions_path = questions_json_path
+        if not os.path.isfile(initial_questions_path):
+            try:
+                fallback_paths = [
+                    os.path.join(self.questions_data_dir, name)
+                    for name in sorted(os.listdir(self.questions_data_dir))
+                    if name.lower().endswith(".json") and os.path.isfile(os.path.join(self.questions_data_dir, name))
+                ]
+            except OSError:
+                fallback_paths = []
+            if fallback_paths:
+                initial_questions_path = fallback_paths[0]
+                logger.warning(
+                    "Configured questions file '%s' not found. Using '%s' instead.",
+                    questions_json_path,
+                    initial_questions_path,
+                )
+
+        self.quiz_manager = QuizManager(initial_questions_path,logger)
         self.persistence = PicklePersistence('quiz_bot_data.pkl')
         self.application = Application.builder().token(self.token).persistence(self.persistence).build()
         self.logger = logger
         self.state_handlers = {
+            State.SELECT_PAPER: self.conv_quiz_selected_paper,
             State.SELECT_LANGUAGE: self.conv_quiz_selected_language,
             State.SELECT_TOPIC: self.conv_quiz_selected_topic,
             State.ANSWERING_QUESTION: self.conv_quiz_answer,
@@ -33,6 +56,73 @@ class QuizBot:
             State.IF_TOPIC: self.conv_quiz_topic_selection,
             State.SELECT_CUSTOM_NQUESTION: self.conv_quiz_questions_selection,
         }
+
+    def _trim_paper_label(self, filename: str, max_length: int = 40) -> str:
+        label = os.path.splitext(filename)[0].replace("_", " ").strip() or filename
+        if len(label) <= max_length:
+            return label
+        return f"{label[: max_length - 3]}..."
+
+    def _discover_question_papers(self) -> list:
+        papers = []
+        try:
+            all_names = sorted(os.listdir(self.questions_data_dir))
+        except OSError as exc:
+            self.logger.error(f"Cannot read questions directory '{self.questions_data_dir}': {exc}")
+            return papers
+
+        json_names = [name for name in all_names if name.lower().endswith(".json")]
+        for index, filename in enumerate(json_names):
+            full_path = os.path.join(self.questions_data_dir, filename)
+            if not os.path.isfile(full_path):
+                continue
+            papers.append(
+                {
+                    "id": f"{CALLBACK_PAPER_PREFIX}{index}",
+                    "path": full_path,
+                    "label": self._trim_paper_label(filename),
+                    "filename": filename,
+                }
+            )
+        return papers
+
+    def _use_selected_question_file(self, file_path: str) -> None:
+        if not file_path:
+            return
+        if os.path.normcase(self.quiz_manager.question_file) == os.path.normcase(file_path):
+            return
+        self.quiz_manager = QuizManager(file_path, self.logger)
+
+    async def _send_question_paper_selection(self, update: Update, context: CallbackContext):
+        papers = self._discover_question_papers()
+        context.user_data["available_question_papers"] = papers
+
+        if not papers:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown("_No JSON question paper found in data folder._"),
+                parse_mode="MarkdownV2",
+            )
+            await self.command_restart(update, context)
+            return
+
+        if len(papers) == 1:
+            selected_paper = papers[0]
+            context.user_data["selected_question_file"] = selected_paper["path"]
+            context.user_data["selected_question_paper_name"] = selected_paper["filename"]
+            self._use_selected_question_file(selected_paper["path"])
+            await self._handle_next_setup_step(update, context)
+            return
+
+        buttons = [(paper["id"], paper["label"]) for paper in papers]
+        message = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=_escape_markdown("_Select question paper:_"),
+            parse_mode="MarkdownV2",
+            reply_markup=make_inline_keyboard_from_list(buttons, row_size=1),
+        )
+        context.user_data["state"] = State.SELECT_PAPER
+        context.user_data["last_message_id"] = message.message_id
 
     def start_bot(self):
         self.application.add_handler(CommandHandler("start", self.command_start))
@@ -132,6 +222,10 @@ class QuizBot:
         """
         chat_id = update.effective_chat.id
 
+        if "selected_question_file" not in context.user_data:
+            await self._send_question_paper_selection(update, context)
+            return
+
         if LANGUAGE_SELECTION and "custom_language" not in context.user_data:
             message = await context.bot.send_message(
                 chat_id=chat_id,
@@ -169,6 +263,29 @@ class QuizBot:
         context.user_data["state"] = State.ANSWERING_QUESTION
 
     async def conv_quiz_start(self, update: Update, context: CallbackContext):  
+        await self._handle_next_setup_step(update, context)
+
+    async def conv_quiz_selected_paper(self, update: Update, context: CallbackContext):
+        query = update.callback_query
+        selected_id = query.data
+        available_papers = context.user_data.get("available_question_papers", [])
+        selected_paper = next(
+            (paper for paper in available_papers if paper.get("id") == selected_id),
+            None,
+        )
+
+        if selected_paper is None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=_escape_markdown("_Invalid paper selection\\. Please choose from the list\\._"),
+                parse_mode="MarkdownV2",
+            )
+            await self._send_question_paper_selection(update, context)
+            return
+
+        context.user_data["selected_question_file"] = selected_paper["path"]
+        context.user_data["selected_question_paper_name"] = selected_paper["filename"]
+        self._use_selected_question_file(selected_paper["path"])
         await self._handle_next_setup_step(update, context)
     
     async def conv_quiz_language_selection(self, update: Update, context: CallbackContext):
