@@ -55,7 +55,10 @@ def make_inline_keyboard_for_incorrect_solutions(solution_items: list, row_size:
         for item in solution_items
     ]
     rows = [buttons[i:i + row_size] for i in range(0, len(buttons), row_size)]
-    rows.append([InlineKeyboardButton("Main Menu", callback_data=CALLBACK_MAIN_MENU)])
+    rows.append([
+        InlineKeyboardButton("Next Set", callback_data=CALLBACK_NEXT_SET),
+        InlineKeyboardButton("Main Menu", callback_data=CALLBACK_MAIN_MENU),
+    ])
     return InlineKeyboardMarkup(rows)
 
 def _escape_markdown(text: str) -> str:

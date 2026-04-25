@@ -200,3 +200,20 @@ async def test_conv_quiz_finish_shows_post_quiz_actions(mock_bot, mock_update, m
     assert mock_context.bot.send_message.await_count == 2
     mock_bot._send_incorrect_solutions_menu.assert_not_called()
     assert mock_context.user_data["state"] == State.SELECTING_ACTION
+
+
+@pytest.mark.asyncio
+async def test_incorrect_review_menu_keeps_next_set_available(mock_bot, mock_update, mock_context):
+    mock_context.user_data["quiz"] = {
+        "question_results": [
+            {"question_id": 10, "question_number": 1, "is_correct": False},
+            {"question_id": 11, "question_number": 2, "is_correct": True},
+        ]
+    }
+
+    await mock_bot._send_incorrect_solutions_menu(mock_update, mock_context)
+
+    reply_markup = mock_context.bot.send_message.await_args.kwargs["reply_markup"]
+    last_row = reply_markup.inline_keyboard[-1]
+    assert [button.text for button in last_row] == ["Next Set", "Main Menu"]
+    assert [button.callback_data for button in last_row] == ["next_set", "main_menu"]
