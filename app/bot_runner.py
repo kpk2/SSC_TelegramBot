@@ -12,6 +12,7 @@ from .handlers import (State,
     extract_list_of_main_operations,
     CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU, CALLBACK_SOLUTION_PREFIX
 )
+import html
 import random, time
 
 
@@ -328,6 +329,74 @@ class QuizBot:
         )
         context.user_data["last_message_id"] = message.message_id
 
+    def _build_question_review_html(
+        self,
+        question: Question,
+        question_number: int = None,
+        selected_display: str = None,
+        time_taken_seconds: float = None,
+    ) -> str:
+        title = "<b>Question Review</b>"
+        if question_number is not None:
+            title = f"<b>Review - Question {question_number}</b>"
+
+        options_lines = []
+        for idx, option in enumerate(question.options):
+            options_lines.append(f"{chr(65 + idx)} - {html.escape(str(option))}")
+
+        correct_label = "N/A"
+        correct_text = ""
+        if isinstance(question.correct_index, int) and 0 <= question.correct_index < len(question.options):
+            correct_label = chr(65 + question.correct_index)
+            correct_text = str(question.options[question.correct_index])
+
+        explanation_text = "Comment not available."
+        if isinstance(question.explanation, str) and question.explanation.strip() and "None" not in question.explanation:
+            explanation_text = question.explanation
+
+        lines = [
+            title,
+            "",
+            f"<b>Question:</b> {html.escape(str(question.text))}",
+            "",
+            "<b>Options:</b>",
+        ]
+        lines.extend(options_lines or ["No options available"])
+        lines.extend(
+            [
+                "",
+                f"<b>Correct Answer:</b> {correct_label} - {html.escape(correct_text)}",
+                f"<b>Explanation:</b> {html.escape(explanation_text)}",
+            ]
+        )
+
+        if selected_display is not None:
+            lines.append(f"<b>Your answer:</b> {html.escape(selected_display)}")
+        if time_taken_seconds is not None:
+            lines.append(f"<b>Time taken:</b> {time_taken_seconds:.3f} sec")
+
+        return "\n".join(lines)
+
+    def _format_selected_answer_display(self, question: Question, selected_result: dict) -> str:
+        selected_label = selected_result.get("selected_option_label", "N/A")
+        if selected_label == CALLBACK_SKIP:
+            return "Skipped"
+
+        selected_index = selected_result.get("selected_option_index")
+        if isinstance(selected_index, int) and 0 <= selected_index < len(question.options):
+            normalized_label = chr(65 + selected_index)
+            normalized_text = str(question.options[selected_index])
+            if selected_label not in ("", None, "N/A") and selected_label != normalized_label:
+                return f"{normalized_label} - {normalized_text} (selected as {selected_label} in shuffled options)"
+            return f"{normalized_label} - {normalized_text}"
+
+        selected_text = selected_result.get("selected_option_text", "")
+        if selected_text:
+            if selected_label not in ("", None, "N/A"):
+                return f"{selected_label} - {selected_text}"
+            return str(selected_text)
+        return str(selected_label)
+
     def _build_solution_callback_data(self, result_index: int) -> str:
         return f"{CALLBACK_SOLUTION_PREFIX}{result_index}"
 
@@ -525,25 +594,18 @@ class QuizBot:
             await self._send_incorrect_solutions_menu(update, context)
             return
 
-        selected_label = selected_result.get("selected_option_label", "N/A")
-        selected_text = selected_result.get("selected_option_text", "")
-        if selected_label == CALLBACK_SKIP:
-            selected_display = "Skipped"
-        elif selected_text:
-            selected_display = f"{selected_label} - {selected_text}"
-        else:
-            selected_display = selected_label
+        selected_display = self._format_selected_answer_display(question, selected_result)
 
-        solution_text = (
-            f"*Review - Question {selected_result.get('question_number', 0)}*\n\n"
-            f"{question.question_to_string_for_review()}\n"
-            f"*Your answer:* {selected_display}\n"
-            f"*Time taken:* {selected_result.get('time_taken_seconds', 0.0):.3f} sec\n"
+        solution_text = self._build_question_review_html(
+            question=question,
+            question_number=selected_result.get("question_number"),
+            selected_display=selected_display,
+            time_taken_seconds=selected_result.get("time_taken_seconds", 0.0),
         )
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=_escape_markdown(solution_text),
-            parse_mode="MarkdownV2",
+            text=solution_text,
+            parse_mode="HTML",
         )
         await self._send_incorrect_solutions_menu(update, context)
 
@@ -576,8 +638,8 @@ class QuizBot:
                 return
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, 
-                text=_escape_markdown(q.question_to_string_for_review()), 
-                parse_mode="MarkdownV2",
+                text=self._build_question_review_html(question=q),
+                parse_mode="HTML",
                 reply_markup=ReplyKeyboardRemove()
                 )
         except ValueError:
