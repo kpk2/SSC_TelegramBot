@@ -175,3 +175,70 @@ def test_get_answered_question_ids_filters_by_user(tmp_path):
     }
     assert "Already answered by user 1" in answered_question_texts
     assert "Answered by another user" not in answered_question_texts
+
+
+def test_get_user_overall_answer_stats(tmp_path):
+    questions_path = tmp_path / "questions.json"
+    questions_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 1,
+                    "language": "en",
+                    "text": "Q1",
+                    "options": ["A", "B", "C", "D"],
+                    "correct_index": 1,
+                    "verified": True,
+                    "explanation": "E1",
+                    "topic": "grammar",
+                    "answer_history": [
+                        {
+                            "user_id": 10,
+                            "selected_option_label": "B",
+                            "is_correct": True,
+                        },
+                        {
+                            "user_id": 10,
+                            "selected_option_label": "Skip",
+                            "is_correct": False,
+                        },
+                    ],
+                },
+                {
+                    "id": 2,
+                    "language": "en",
+                    "text": "Q2",
+                    "options": ["A", "B", "C", "D"],
+                    "correct_index": 2,
+                    "verified": True,
+                    "explanation": "E2",
+                    "topic": "grammar",
+                    "answer_history": [
+                        {
+                            "user_id": 10,
+                            "selected_option_label": "A",
+                            "is_correct": False,
+                        },
+                        {
+                            "user_id": 20,
+                            "selected_option_label": "C",
+                            "is_correct": True,
+                        },
+                    ],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    manager = QuizManager(str(questions_path), MagicMock())
+    stats = manager.get_user_overall_answer_stats(10)
+
+    assert stats["total_attempts"] == 3
+    assert stats["correct_answers"] == 1
+    assert stats["wrong_answers"] == 1
+    assert stats["skipped_answers"] == 1
+    assert stats["unique_answered_questions"] == 2
+    assert stats["total_available_questions"] == 2
+    assert stats["remaining_unanswered_questions"] == 0
+    assert stats["accuracy_percent"] == 50.0

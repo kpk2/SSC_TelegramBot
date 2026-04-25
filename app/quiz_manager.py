@@ -150,6 +150,79 @@ class QuizManager:
 
         return excluded_runtime_ids
 
+    def get_user_overall_answer_stats(self, user_id: int) -> dict:
+        total_available_questions = self.get_number_of_questions()
+        default_stats = {
+            "total_attempts": 0,
+            "correct_answers": 0,
+            "wrong_answers": 0,
+            "skipped_answers": 0,
+            "unique_answered_questions": 0,
+            "remaining_unanswered_questions": total_available_questions,
+            "total_available_questions": total_available_questions,
+            "accuracy_percent": 0.0,
+        }
+
+        if user_id is None:
+            return default_stats
+
+        try:
+            with open(self.question_file, "r", encoding="utf-8") as file:
+                questions_list = json.load(file)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return default_stats
+
+        if not isinstance(questions_list, list):
+            return default_stats
+
+        total_attempts = 0
+        correct_answers = 0
+        wrong_answers = 0
+        skipped_answers = 0
+
+        for item in questions_list:
+            answer_history = item.get("answer_history")
+            if not isinstance(answer_history, list):
+                continue
+
+            for entry in answer_history:
+                if not isinstance(entry, dict) or entry.get("user_id") != user_id:
+                    continue
+
+                total_attempts += 1
+                selected_label = entry.get("selected_option_label", "")
+                is_skipped = isinstance(selected_label, str) and selected_label.lower() == "skip"
+
+                if is_skipped:
+                    skipped_answers += 1
+                elif entry.get("is_correct") is True:
+                    correct_answers += 1
+                else:
+                    wrong_answers += 1
+
+        unique_answered_questions = len(self.get_answered_question_ids(user_id))
+        remaining_unanswered_questions = max(
+            total_available_questions - unique_answered_questions,
+            0,
+        )
+        attempted_without_skips = correct_answers + wrong_answers
+        accuracy_percent = (
+            (correct_answers / attempted_without_skips) * 100
+            if attempted_without_skips > 0
+            else 0.0
+        )
+
+        return {
+            "total_attempts": total_attempts,
+            "correct_answers": correct_answers,
+            "wrong_answers": wrong_answers,
+            "skipped_answers": skipped_answers,
+            "unique_answered_questions": unique_answered_questions,
+            "remaining_unanswered_questions": remaining_unanswered_questions,
+            "total_available_questions": total_available_questions,
+            "accuracy_percent": round(accuracy_percent, 2),
+        }
+
     def save_answer_details(
         self,
         question_id: int,

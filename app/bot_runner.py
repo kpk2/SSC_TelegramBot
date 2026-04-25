@@ -523,6 +523,8 @@ class QuizBot:
         total = len(user_quiz.get("questions_ids", []))
         incorrect_total = total - correct
         score = self.quiz_manager.quiz_score(correct, wrong)
+        user_id = update.effective_user.id if update.effective_user else None
+        overall_stats = self.quiz_manager.get_user_overall_answer_stats(user_id)
 
         total_time_text = "N/A"
         start_time = context.user_data.get("start_time")
@@ -546,7 +548,15 @@ class QuizBot:
             f"Skipped: {skipped}\n"
             f"Final score: {score:.2f}\n"
             f"Total time: {total_time_text}\n"
-            f"Average time/question: {avg_time:.2f} sec"
+            f"Average time/question: {avg_time:.2f} sec\n\n"
+            f"Overall stats (all quizzes):\n"
+            f"Unique questions answered: {overall_stats['unique_answered_questions']}/{overall_stats['total_available_questions']}\n"
+            f"Remaining unanswered questions: {overall_stats['remaining_unanswered_questions']}\n"
+            f"Total attempts: {overall_stats['total_attempts']}\n"
+            f"Correct: {overall_stats['correct_answers']}\n"
+            f"Wrong: {overall_stats['wrong_answers']}\n"
+            f"Skipped: {overall_stats['skipped_answers']}\n"
+            f"Accuracy (excluding skips): {overall_stats['accuracy_percent']:.2f}%"
         )
 
         await context.bot.send_message(
