@@ -1,21 +1,21 @@
 # app/bot_runner.py
-from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import Application, CallbackContext, PicklePersistence, CommandHandler, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 from .quiz_manager import QuizManager
 from .question import Question
-from app import main_menu_text, get_next_question_id
-from config import LANGUAGE_SELECTION, TOPIC_SELECTION, QUESTION_NUMBER_SELECTION, CORRECT_ANSWER_WEIGHT, WRONG_ANSWER_WEIGHT, DEFAULT_NUMBER_OF_QUESTIONS
+from app import main_menu_text
+from config import LANGUAGE_SELECTION, TOPIC_SELECTION, QUESTION_NUMBER_SELECTION, DEFAULT_NUMBER_OF_QUESTIONS
 from .handlers import (State,
     make_inline_keyboard_for_choice, make_inline_keyboard_for_question_quiz,
     make_inline_keyboard_for_incorrect_solutions,
     _escape_markdown, make_inline_keyboard_from_list, make_inline_keyboard_for_list,
     extract_list_of_main_operations,
     CALLBACK_YES, CALLBACK_NO, CALLBACK_SKIP, CALLBACK_MAIN_MENU, CALLBACK_SOLUTION_PREFIX,
-    CALLBACK_PAPER_PREFIX
+    CALLBACK_PAPER_PREFIX, CALLBACK_NEXT_SET, CALLBACK_REVIEW_INCORRECT
 )
 import html
 import os
-import random, time
+import time
 
 
 class QuizBot:
@@ -93,13 +93,27 @@ class QuizBot:
             return
         self.quiz_manager = QuizManager(file_path, self.logger)
 
+    async def _send_message(self, context: CallbackContext, chat_id: int, **kwargs):
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            disable_notification=True,
+            **kwargs,
+        )
+
+    async def _reply_text(self, update: Update, **kwargs):
+        return await update.message.reply_text(
+            disable_notification=True,
+            **kwargs,
+        )
+
     async def _send_question_paper_selection(self, update: Update, context: CallbackContext):
         papers = self._discover_question_papers()
         context.user_data["available_question_papers"] = papers
 
         if not papers:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("_No JSON question paper found in data folder._"),
                 parse_mode="MarkdownV2",
             )
@@ -115,8 +129,9 @@ class QuizBot:
             return
 
         buttons = [(paper["id"], paper["label"]) for paper in papers]
-        message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown("_Select question paper:_"),
             parse_mode="MarkdownV2",
             reply_markup=make_inline_keyboard_from_list(buttons, row_size=1),
@@ -151,6 +166,10 @@ class QuizBot:
             await self.conv_quiz_start(update, context)
         elif query.data == "review_question":
             await self.conv_review_question_start(update, context)
+        elif query.data == CALLBACK_NEXT_SET:
+            await self._start_selected_quiz_batch(update, context)
+        elif query.data == CALLBACK_REVIEW_INCORRECT:
+            await self._send_incorrect_solutions_menu(update, context)
         else:
             handler = self.state_handlers.get(state)
             if handler:
@@ -178,8 +197,9 @@ class QuizBot:
         user_id = update.effective_user.id
         self.logger.info(f"Message : issued the /start command.")
         context.user_data.clear()
-        message =await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown(main_menu_text),
             parse_mode="MarkdownV2",
             reply_markup=make_inline_keyboard_from_list(extract_list_of_main_operations())
@@ -203,8 +223,9 @@ class QuizBot:
         user_id = update.effective_user.id
         self.logger.info(f"Message : issued a restart/cancel command.")
         context.user_data.clear()
-        message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown(main_menu_text),
             parse_mode="MarkdownV2",
             reply_markup=make_inline_keyboard_from_list(extract_list_of_main_operations())
@@ -227,8 +248,9 @@ class QuizBot:
             return
 
         if LANGUAGE_SELECTION and "custom_language" not in context.user_data:
-            message = await context.bot.send_message(
-                chat_id=chat_id,
+            message = await self._send_message(
+                context,
+                chat_id,
                 text=_escape_markdown("_Do you want to choose a language?_"),
                 parse_mode="MarkdownV2",
                 reply_markup=make_inline_keyboard_for_choice()
@@ -238,8 +260,9 @@ class QuizBot:
             return
 
         if TOPIC_SELECTION and "custom_topic" not in context.user_data:
-            message = await context.bot.send_message(
-                chat_id=chat_id,
+            message = await self._send_message(
+                context,
+                chat_id,
                 text=_escape_markdown("_Do you want to select a specific topic?_"),
                 parse_mode="MarkdownV2",
                 reply_markup=make_inline_keyboard_for_choice()
@@ -249,8 +272,9 @@ class QuizBot:
             return
 
         if QUESTION_NUMBER_SELECTION and "custom_number" not in context.user_data:
-            message = await context.bot.send_message(
-                chat_id=chat_id,
+            message = await self._send_message(
+                context,
+                chat_id,
                 text=_escape_markdown("_Do you want to select the questions number?_"),
                 parse_mode="MarkdownV2",
                 reply_markup=make_inline_keyboard_for_choice()
@@ -275,8 +299,9 @@ class QuizBot:
         )
 
         if selected_paper is None:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("_Invalid paper selection\\. Please choose from the list\\._"),
                 parse_mode="MarkdownV2",
             )
@@ -292,8 +317,9 @@ class QuizBot:
         query = update.callback_query
         if query.data == CALLBACK_YES:
             context.user_data["custom_language"] = True
-            message = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            message = await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("_Select your language from the keyboard:_"), 
                 parse_mode="MarkdownV2",
                 reply_markup=make_inline_keyboard_for_list(self.quiz_manager.extract_list_of_all_languages())
@@ -315,8 +341,9 @@ class QuizBot:
         query = update.callback_query
         if query.data == CALLBACK_YES:
             context.user_data["custom_topic"] = True
-            message = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            message = await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("_Select your topic from the keyboard:_"), 
                 parse_mode="MarkdownV2",
                 reply_markup=make_inline_keyboard_for_list(self.quiz_manager.extract_list_of_all_topics())
@@ -344,8 +371,9 @@ class QuizBot:
                 topic=context.user_data.get("selected_topic"),
                 language=context.user_data.get("selected_language")
             )
-            message = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            message = await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("_Insert the number of questions (1 - " + str(maxnumber) + "):_"), 
                 parse_mode="MarkdownV2",
                 reply_markup=ReplyKeyboardRemove()
@@ -370,18 +398,29 @@ class QuizBot:
                 await self.conv_quiz_start_for_user(update, context, num)
                 context.user_data["state"] = State.ANSWERING_QUESTION
             else:
-                await update.message.reply_text(
+                await self._reply_text(
+                    update,
                     text=_escape_markdown("_Number out of range (1 - {maxnumber}). Try again_"), 
                     parse_mode="MarkdownV2",
                     reply_markup=ReplyKeyboardRemove()
                 )
         except ValueError:
-            await update.message.reply_text(
-                    text=_escape_markdown("_Please insert a valid number:_"), 
-                    parse_mode="MarkdownV2",
-                    reply_markup=ReplyKeyboardRemove()
-                )
-        
+            await self._reply_text(
+                update,
+                text=_escape_markdown("_Please insert a valid number:_"), 
+                parse_mode="MarkdownV2",
+                reply_markup=ReplyKeyboardRemove()
+            )
+
+    async def _start_selected_quiz_batch(self, update: Update, context: CallbackContext):
+        await self.conv_quiz_start_for_user(
+            update,
+            context,
+            context.user_data.get("selected_n_questions", DEFAULT_NUMBER_OF_QUESTIONS),
+        )
+        if context.user_data.get("quiz"):
+            context.user_data["state"] = State.ANSWERING_QUESTION
+
     async def conv_quiz_start_for_user(self, update: Update, context: CallbackContext, n_questions: int):
         user_id = update.effective_user.id
         selected_topic = context.user_data.get("selected_topic")
@@ -396,8 +435,9 @@ class QuizBot:
         excluded_keys_t = list(set(excluded_keys_t).union(already_answered_ids))
         questions_ids = self.quiz_manager.pick_questions(n_questions, excluded_keys_t, excluded_keys_l)
         if not questions_ids:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown(
                     "_No new unanswered questions are available for your selection. Add more questions or clear history._"
                 ),
@@ -406,6 +446,7 @@ class QuizBot:
             await self.command_restart(update, context)
             return
         self.logger.info(f"Message : started a quiz with {len(questions_ids)} questions.")
+        context.user_data.pop("incorrect_question_results", None)
         context.user_data["quiz"] = {
             "questions_ids": questions_ids,
             "current_question_scramble_map": {},
@@ -438,8 +479,9 @@ class QuizBot:
         scrambled_options = [question.options[scrambled_options_map[i]] for i in range(len(question.options))]
         message_text = f"❓ *Question {current_index + 1}/{len(question_ids)}*\n\n{question.question_to_string(scrambled_options_map)}"
 
-        message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=message_text,
             parse_mode="Markdown",
             reply_markup=make_inline_keyboard_for_question_quiz(len(scrambled_options))
@@ -517,14 +559,30 @@ class QuizBot:
     def _build_solution_callback_data(self, result_index: int) -> str:
         return f"{CALLBACK_SOLUTION_PREFIX}{result_index}"
 
+    async def _send_post_quiz_actions(self, update: Update, context: CallbackContext, has_incorrect: bool):
+        actions = [(CALLBACK_NEXT_SET, "Next Set")]
+        if has_incorrect:
+            actions.append((CALLBACK_REVIEW_INCORRECT, "Review Incorrect"))
+        actions.append((CALLBACK_MAIN_MENU, "Main Menu"))
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
+            text=_escape_markdown("_Choose next action:_"),
+            parse_mode="MarkdownV2",
+            reply_markup=make_inline_keyboard_from_list(actions, row_size=1),
+        )
+        context.user_data["last_message_id"] = message.message_id
+        context.user_data["state"] = State.SELECTING_ACTION
+
     async def _send_incorrect_solutions_menu(self, update: Update, context: CallbackContext):
         user_quiz = context.user_data.get("quiz", {})
         question_results = user_quiz.get("question_results", [])
         incorrect_results = [result for result in question_results if not result.get("is_correct")]
 
         if not incorrect_results:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("No incorrect questions to review."),
                 parse_mode="MarkdownV2",
             )
@@ -543,8 +601,9 @@ class QuizBot:
             )
 
         context.user_data["incorrect_question_results"] = incorrect_results
-        message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown(
                 "_Select an incorrect question to view its solution:_"
             ),
@@ -676,22 +735,13 @@ class QuizBot:
             f"Accuracy (excluding skips): {overall_stats['accuracy_percent']:.2f}%"
         )
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown(summary_text),
             parse_mode="MarkdownV2",
         )
-
-        if incorrect_total > 0:
-            await self._send_incorrect_solutions_menu(update, context)
-            return
-
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=_escape_markdown("Great job! You have no incorrect answers to review."),
-            parse_mode="MarkdownV2",
-        )
-        await self.command_restart(update, context)
+        await self._send_post_quiz_actions(update, context, has_incorrect=incorrect_total > 0)
 
     async def conv_quiz_review_incorrect_solution(self, update: Update, context: CallbackContext):
         query = update.callback_query
@@ -703,8 +753,9 @@ class QuizBot:
         )
 
         if selected_result is None:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("Invalid selection. Please choose a question from the list."),
                 parse_mode="MarkdownV2",
             )
@@ -713,8 +764,9 @@ class QuizBot:
 
         question = self.quiz_manager.get_question_data(selected_result["question_id"])
         if question is None:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+            await self._send_message(
+                context,
+                update.effective_chat.id,
                 text=_escape_markdown("Question not found in the current database."),
                 parse_mode="MarkdownV2",
             )
@@ -729,8 +781,9 @@ class QuizBot:
             selected_display=selected_display,
             time_taken_seconds=selected_result.get("time_taken_seconds", 0.0),
         )
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        await self._send_message(
+            context,
+            update.effective_chat.id,
             text=solution_text,
             parse_mode="HTML",
         )
@@ -739,8 +792,9 @@ class QuizBot:
    # Functions for review questions
 
     async def conv_review_question_start(self, update: Update, context: CallbackContext):
-        message = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+        message = await self._send_message(
+            context,
+            update.effective_chat.id,
             text=_escape_markdown("_Please provide the ID of the question you want to review:_"),
             parse_mode="MarkdownV2",
             reply_markup=ReplyKeyboardRemove()
@@ -755,23 +809,26 @@ class QuizBot:
             self.logger.info(f"Message : requested question {question_number}")
             q = self.quiz_manager.get_question_data(question_number)
             if q is None:
-                message = await context.bot.send_message(
-                    chat_id=update.effective_chat.id, 
+                message = await self._send_message(
+                    context,
+                    update.effective_chat.id, 
                     text=_escape_markdown("_Please provide a valid question ID:_"),
                     parse_mode="MarkdownV2",
                     reply_markup=ReplyKeyboardRemove()  
                 )
                 context.user_data["last_message_id"] = message.message_id
                 return
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, 
+            await self._send_message(
+                context,
+                update.effective_chat.id, 
                 text=self._build_question_review_html(question=q),
                 parse_mode="HTML",
                 reply_markup=ReplyKeyboardRemove()
                 )
         except ValueError:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, 
+            await self._send_message(
+                context,
+                update.effective_chat.id, 
                 text="_Invalid question number!_",
                 parse_mode="MarkdownV2",
                 reply_markup=ReplyKeyboardRemove()

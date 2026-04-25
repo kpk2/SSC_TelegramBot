@@ -25,6 +25,8 @@ CALLBACK_SKIP = "Skip"
 CALLBACK_MAIN_MENU = "main_menu"
 CALLBACK_SOLUTION_PREFIX = "solution_"
 CALLBACK_PAPER_PREFIX = "paper_"
+CALLBACK_NEXT_SET = "next_set"
+CALLBACK_REVIEW_INCORRECT = "review_incorrect"
 
 def make_inline_keyboard_from_list(list_options: list, row_size: int = 2) -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(option[1], callback_data=option[0]) for option in list_options]
