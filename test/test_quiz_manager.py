@@ -47,6 +47,7 @@ def test_save_answer_details_appends_history(tmp_path):
     assert history[0]["user_id"] == 12345
     assert history[0]["is_correct"] is True
     assert history[0]["time_taken_seconds"] == 2.346
+    assert history[0]["answer_record_file"].startswith("answer_records/questions/user_12345/")
 
 
 def test_save_answer_details_matches_by_text_when_id_is_generated(tmp_path):
@@ -94,6 +95,65 @@ def test_save_answer_details_matches_by_text_when_id_is_generated(tmp_path):
     assert "answer_history" in persisted[0]
     assert len(persisted[0]["answer_history"]) == 1
     assert persisted[0]["answer_history"][0]["user_id"] == 999
+
+
+def test_save_answer_details_creates_separate_json_record(tmp_path):
+    questions_path = tmp_path / "questions.json"
+    questions_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 7,
+                    "language": "en",
+                    "text": "Which option is correct?",
+                    "options": ["Alpha", "Beta", "Gamma", "Delta"],
+                    "correct_index": 2,
+                    "verified": True,
+                    "explanation": "Gamma is the expected answer",
+                    "topic": "logic",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    manager = QuizManager(str(questions_path), MagicMock())
+    manager.save_answer_details(
+        question_id=7,
+        question_text="Which option is correct?",
+        user_id=55,
+        selected_option_label="B",
+        selected_option_index=1,
+        selected_option_text="Beta",
+        correct_option_label="C",
+        correct_option_index=2,
+        correct_option_text="Gamma",
+        is_correct=False,
+        time_taken_seconds=4.2,
+        question_number=3,
+        total_questions=10,
+    )
+
+    answer_record_files = list(
+        (tmp_path / "answer_records" / "questions" / "user_55").glob("*.json")
+    )
+
+    assert len(answer_record_files) == 1
+
+    record = json.loads(answer_record_files[0].read_text(encoding="utf-8"))
+    assert record["user"]["id"] == 55
+    assert record["quiz_context"]["question_number"] == 3
+    assert record["quiz_context"]["total_questions"] == 10
+    assert record["answer"]["selected_option_label"] == "B"
+    assert record["answer"]["selected_option_text"] == "Beta"
+    assert record["answer"]["correct_option_text"] == "Gamma"
+    assert record["answer"]["is_correct"] is False
+    assert record["answer"]["time_taken_seconds"] == 4.2
+    assert record["question"]["id"] == 7
+    assert record["question"]["text"] == "Which option is correct?"
+    assert record["question"]["topic"] == "logic"
+    assert record["question"]["options"][2]["label"] == "C"
+    assert record["question"]["options"][2]["text"] == "Gamma"
 
 
 def test_pick_questions_skips_invalid_correct_index(tmp_path):

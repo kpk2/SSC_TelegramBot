@@ -7,7 +7,10 @@ from app import set_last_question_id
 from config import CORRECT_ANSWER_WEIGHT, WRONG_ANSWER_WEIGHT
 from datetime import datetime
 import json
+import os
 import random
+import re
+from uuid import uuid4
 
 class QuizManager:
     
@@ -17,6 +20,13 @@ class QuizManager:
         set_last_question_id(max(self.questions_db.keys(), default=0))
         self.logger = logger
         self.question_file=questions_json_pat
+        self.question_file_dir = os.path.dirname(os.path.abspath(self.question_file))
+        question_paper_name = os.path.splitext(os.path.basename(self.question_file))[0]
+        self.answer_records_dir = os.path.join(
+            self.question_file_dir,
+            "answer_records",
+            self._sanitize_path_component(question_paper_name),
+        )
         
     def get_number_of_questions(self, topic=None, language=None) -> int:
         if topic is None and language is None:
@@ -107,6 +117,98 @@ class QuizManager:
             scrambled_map[i] = random_index
             available_indices.remove(random_index)
         return scrambled_map
+
+    def _sanitize_path_component(self, value) -> str:
+        normalized_value = str(value).strip()
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized_value)
+        sanitized = sanitized.strip("._")
+        return sanitized or "unknown"
+
+    def _build_question_options_payload(self, question: Question) -> list:
+        if question is None or not isinstance(question.options, list):
+            return []
+
+        return [
+            {
+                "label": chr(65 + index),
+                "index": index,
+                "text": option,
+            }
+            for index, option in enumerate(question.options)
+        ]
+
+    def _create_answer_record(
+        self,
+        question_id: int,
+        question_text: str,
+        user_id: int,
+        selected_option_label: str,
+        selected_option_index: int,
+        selected_option_text: str,
+        correct_option_label: str,
+        correct_option_index: int,
+        correct_option_text: str,
+        is_correct: bool,
+        time_taken_seconds: float,
+        question_number: int,
+        total_questions: int,
+        answered_at: str,
+    ) -> dict:
+        question = self.get_question_data(question_id)
+        rounded_time = round(max(time_taken_seconds, 0), 3)
+        is_skipped = isinstance(selected_option_label, str) and selected_option_label.lower() == "skip"
+
+        return {
+            "record_id": uuid4().hex,
+            "answered_at": answered_at,
+            "user": {
+                "id": user_id,
+            },
+            "quiz_context": {
+                "question_number": question_number,
+                "total_questions": total_questions,
+                "time_taken_seconds": rounded_time,
+            },
+            "question_paper": {
+                "file_name": os.path.basename(self.question_file),
+                "file_path": self.question_file,
+            },
+            "question": {
+                "id": question_id,
+                "text": question_text,
+                "topic": question.topic if question else None,
+                "language": question.language if question else None,
+                "verified": question.verified if question else None,
+                "explanation": question.explanation if question else "",
+                "options": self._build_question_options_payload(question),
+            },
+            "answer": {
+                "selected_option_label": selected_option_label,
+                "selected_option_index": selected_option_index,
+                "selected_option_text": selected_option_text,
+                "correct_option_label": correct_option_label,
+                "correct_option_index": correct_option_index,
+                "correct_option_text": correct_option_text,
+                "is_correct": is_correct,
+                "is_skipped": is_skipped,
+                "time_taken_seconds": rounded_time,
+            },
+        }
+
+    def _write_answer_record_file(self, answer_record: dict, user_id: int, question_id: int) -> str:
+        safe_user_id = self._sanitize_path_component(f"user_{user_id}")
+        safe_question_id = self._sanitize_path_component(f"q_{question_id}")
+        answer_record_dir = os.path.join(self.answer_records_dir, safe_user_id)
+        os.makedirs(answer_record_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+        record_name = f"{timestamp}_{safe_question_id}_{answer_record['record_id'][:8]}.json"
+        record_path = os.path.join(answer_record_dir, record_name)
+
+        with open(record_path, "w", encoding="utf-8") as file:
+            json.dump(answer_record, file, ensure_ascii=False, indent=4)
+
+        return os.path.relpath(record_path, start=self.question_file_dir).replace("\\", "/")
 
     def get_answered_question_ids(self, user_id: int) -> set:
         if user_id is None:
@@ -239,8 +341,9 @@ class QuizManager:
         question_number: int,
         total_questions: int,
     ) -> None:
+        answered_at = datetime.now().isoformat(timespec="seconds")
         answer_entry = {
-            "answered_at": datetime.now().isoformat(timespec="seconds"),
+            "answered_at": answered_at,
             "user_id": user_id,
             "question_number": question_number,
             "total_questions": total_questions,
@@ -253,6 +356,31 @@ class QuizManager:
             "is_correct": is_correct,
             "time_taken_seconds": round(max(time_taken_seconds, 0), 3),
         }
+
+        try:
+            answer_record = self._create_answer_record(
+                question_id=question_id,
+                question_text=question_text,
+                user_id=user_id,
+                selected_option_label=selected_option_label,
+                selected_option_index=selected_option_index,
+                selected_option_text=selected_option_text,
+                correct_option_label=correct_option_label,
+                correct_option_index=correct_option_index,
+                correct_option_text=correct_option_text,
+                is_correct=is_correct,
+                time_taken_seconds=time_taken_seconds,
+                question_number=question_number,
+                total_questions=total_questions,
+                answered_at=answered_at,
+            )
+            answer_entry["answer_record_file"] = self._write_answer_record_file(
+                answer_record,
+                user_id=user_id,
+                question_id=question_id,
+            )
+        except OSError as exc:
+            self.logger.error(f"Failed to write answer record for question {question_id}: {exc}")
 
         try:
             with open(self.question_file, "r", encoding="utf-8") as file:

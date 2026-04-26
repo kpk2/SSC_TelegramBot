@@ -11,6 +11,8 @@ __pycache__/
 
 # Telegram bot persistence file
 quiz_bot_data.pkl
+data/answer_records/**
+!data/answer_records/.gitkeep
 
 # Operating system-specific files
 .DS_Store
